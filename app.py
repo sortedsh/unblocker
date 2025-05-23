@@ -1,6 +1,9 @@
 from flask import Flask, request, Response
 import requests
+from bs4 import BeautifulSoup
 import urllib3
+import traceback
+from urllib.parse import urljoin, quote
 
 app = Flask(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -67,7 +70,7 @@ HTML_TEMPLATE = '''
 </head>
 <body>
     <div class="container">
-        <h2>🌐 Python Web Unblocker</h2>
+        <h2>🌐 Website Unblocker</h2>
         <form action="/proxy" method="get">
             <input type="text" name="url" placeholder="https://example.com" required />
             <br>
@@ -78,6 +81,41 @@ HTML_TEMPLATE = '''
 </body>
 </html>
 '''
+
+def rewrite_html(html, base_url):
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Tags and their attributes to rewrite
+    tags_attrs = {
+        'a': 'href',
+        'img': 'src',
+        'script': 'src',
+        'link': 'href',
+        'iframe': 'src',
+    }
+
+    for tag_name, attr in tags_attrs.items():
+        for tag in soup.find_all(tag_name):
+            if tag.has_attr(attr):
+                try:
+                    raw_url = tag[attr]
+                    if raw_url.startswith('javascript:'):
+                        continue
+                    full_url = urljoin(base_url, raw_url)
+                    tag[attr] = f"/proxy?url={quote(full_url)}"
+                except Exception as e:
+                    print(f"Error rewriting tag <{tag_name}>: {e}")
+
+    # Rewrite form actions
+    for form in soup.find_all('form'):
+        if form.has_attr('action'):
+            try:
+                full_url = urljoin(base_url, form['action'])
+                form['action'] = f"/proxy?url={quote(full_url)}"
+            except Exception as e:
+                print(f"Error rewriting form action: {e}")
+
+    return str(soup)
 
 @app.route('/')
 def home():
@@ -90,17 +128,22 @@ def proxy():
         return HTML_TEMPLATE.format(error='<div class="error">⚠️ No URL provided.</div>')
 
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(target_url, headers=headers, verify=False)
-        return Response(response.content, content_type=response.headers.get('Content-Type', 'text/html'))
+        content_type = response.headers.get('Content-Type', '')
+
+        if 'text/html' in content_type:
+            rewritten_html = rewrite_html(response.text, target_url)
+            return Response(rewritten_html, content_type='text/html')
+        else:
+            return Response(response.content, content_type=content_type)
 
     except Exception as e:
+        traceback.print_exc()
         error_message = f'<div class="error">❌ Error accessing <strong>{target_url}</strong>:<br><pre>{str(e)}</pre></div>'
         return HTML_TEMPLATE.format(error=error_message)
 
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
