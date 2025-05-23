@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import urllib3
 import traceback
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, unquote
 
 app = Flask(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -84,36 +84,26 @@ HTML_TEMPLATE = '''
 
 def rewrite_html(html, base_url):
     soup = BeautifulSoup(html, 'html.parser')
-
-    # Tags and their attributes to rewrite
     tags_attrs = {
         'a': 'href',
         'img': 'src',
         'script': 'src',
         'link': 'href',
         'iframe': 'src',
+        'form': 'action'
     }
 
-    for tag_name, attr in tags_attrs.items():
-        for tag in soup.find_all(tag_name):
-            if tag.has_attr(attr):
+    for tag, attr in tags_attrs.items():
+        for element in soup.find_all(tag):
+            if element.has_attr(attr):
                 try:
-                    raw_url = tag[attr]
-                    if raw_url.startswith('javascript:'):
+                    original_url = element[attr]
+                    if original_url.startswith('javascript:') or original_url.startswith('#'):
                         continue
-                    full_url = urljoin(base_url, raw_url)
-                    tag[attr] = f"/proxy?url={quote(full_url)}"
+                    full_url = urljoin(base_url, original_url)
+                    element[attr] = "/proxy?url=" + quote(full_url)
                 except Exception as e:
-                    print(f"Error rewriting tag <{tag_name}>: {e}")
-
-    # Rewrite form actions
-    for form in soup.find_all('form'):
-        if form.has_attr('action'):
-            try:
-                full_url = urljoin(base_url, form['action'])
-                form['action'] = f"/proxy?url={quote(full_url)}"
-            except Exception as e:
-                print(f"Error rewriting form action: {e}")
+                    print(f"Error rewriting <{tag} {attr}>: {e}")
 
     return str(soup)
 
@@ -121,7 +111,7 @@ def rewrite_html(html, base_url):
 def home():
     return HTML_TEMPLATE.format(error='')
 
-@app.route('/proxy')
+@app.route('/proxy', methods=['GET', 'POST'])
 def proxy():
     target_url = request.args.get('url')
     if not target_url:
@@ -129,19 +119,24 @@ def proxy():
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(target_url, headers=headers, verify=False)
-        content_type = response.headers.get('Content-Type', '')
 
+        # Forward cookies and headers (optional, more advanced)
+        if request.method == 'POST':
+            response = requests.post(target_url, data=request.form, headers=headers, verify=False)
+        else:
+            response = requests.get(target_url, headers=headers, verify=False)
+
+        content_type = response.headers.get('Content-Type', '')
         if 'text/html' in content_type:
-            rewritten_html = rewrite_html(response.text, target_url)
-            return Response(rewritten_html, content_type='text/html')
+            rewritten = rewrite_html(response.text, target_url)
+            return Response(rewritten, content_type='text/html')
         else:
             return Response(response.content, content_type=content_type)
 
     except Exception as e:
         traceback.print_exc()
-        error_message = f'<div class="error">❌ Error accessing <strong>{target_url}</strong>:<br><pre>{str(e)}</pre></div>'
-        return HTML_TEMPLATE.format(error=error_message)
+        error_html = f'<div class="error">❌ Error accessing <strong>{target_url}</strong>:<br><pre>{str(e)}</pre></div>'
+        return HTML_TEMPLATE.format(error=error_html)
 
 if __name__ == '__main__':
     import os
