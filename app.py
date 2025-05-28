@@ -1,9 +1,9 @@
 from flask import Flask, request, Response
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import urllib3
 import traceback
-from urllib.parse import urljoin, quote, unquote
+from urllib.parse import urljoin, quote
 
 app = Flask(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -84,26 +84,34 @@ HTML_TEMPLATE = '''
 
 def rewrite_html(html, base_url):
     soup = BeautifulSoup(html, 'html.parser')
+
     tags_attrs = {
         'a': 'href',
         'img': 'src',
         'script': 'src',
         'link': 'href',
         'iframe': 'src',
-        'form': 'action'
     }
 
-    for tag, attr in tags_attrs.items():
-        for element in soup.find_all(tag):
-            if element.has_attr(attr):
+    for tag_name, attr in tags_attrs.items():
+        for tag in soup.find_all(tag_name):
+            if tag.has_attr(attr):
                 try:
-                    original_url = element[attr]
-                    if original_url.startswith('javascript:') or original_url.startswith('#'):
+                    raw_url = tag[attr]
+                    if raw_url.startswith('javascript:'):
                         continue
-                    full_url = urljoin(base_url, original_url)
-                    element[attr] = "/proxy?url=" + quote(full_url)
+                    full_url = urljoin(base_url, raw_url)
+                    tag[attr] = f"/proxy?url={quote(full_url)}"
                 except Exception as e:
-                    print(f"Error rewriting <{tag} {attr}>: {e}")
+                    print(f"Error rewriting tag <{tag_name}>: {e}")
+
+    for form in soup.find_all('form'):
+        if form.has_attr('action'):
+            try:
+                full_url = urljoin(base_url, form['action'])
+                form['action'] = f"/proxy?url={quote(full_url)}"
+            except Exception as e:
+                print(f"Error rewriting form action: {e}")
 
     return str(soup)
 
@@ -111,32 +119,40 @@ def rewrite_html(html, base_url):
 def home():
     return HTML_TEMPLATE.format(error='')
 
-@app.route('/proxy', methods=['GET', 'POST'])
+@app.route('/proxy')
 def proxy():
     target_url = request.args.get('url')
     if not target_url:
         return HTML_TEMPLATE.format(error='<div class="error">⚠️ No URL provided.</div>')
 
+    if not target_url.startswith(('http://', 'https://')):
+        target_url = 'http://' + target_url
+
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-
-        # Forward cookies and headers (optional, more advanced)
-        if request.method == 'POST':
-            response = requests.post(target_url, data=request.form, headers=headers, verify=False)
-        else:
-            response = requests.get(target_url, headers=headers, verify=False)
-
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(target_url, stream=True, timeout=10)
         content_type = response.headers.get('Content-Type', '')
-        if 'text/html' in content_type:
-            rewritten = rewrite_html(response.text, target_url)
-            return Response(rewritten, content_type='text/html')
-        else:
-            return Response(response.content, content_type=content_type)
+        disposition = response.headers.get('Content-Disposition', '')
+        filename = None
+
+        if 'attachment' in disposition:
+            parts = disposition.split('filename=')
+            if len(parts) > 1:
+                filename = parts[1].strip('"')
+
+        if 'text/html' in content_type.lower():
+            rewritten_html = rewrite_html(response.text, target_url)
+            return Response(rewritten_html, content_type='text/html')
+
+        headers = {}
+        if filename:
+            headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return Response(response.content, content_type=content_type, headers=headers)
 
     except Exception as e:
         traceback.print_exc()
-        error_html = f'<div class="error">❌ Error accessing <strong>{target_url}</strong>:<br><pre>{str(e)}</pre></div>'
-        return HTML_TEMPLATE.format(error=error_html)
+        error_message = f'<div class="error">❌ Error accessing <strong>{target_url}</strong>:<br><pre>{str(e)}</pre></div>'
+        return HTML_TEMPLATE.format(error=error_message)
 
 if __name__ == '__main__':
     import os
